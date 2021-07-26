@@ -3,6 +3,7 @@ import time
 import threading
 import random
 from queue import PriorityQueue
+from typing import Union
 
 from prometheus_client import Gauge, Counter, Histogram
 
@@ -10,28 +11,27 @@ logger = logging.getLogger(__name__)
 
 
 class Message:
-    def __init__(self, body, send_at, queued_at, attempt=0):
+    def __init__(self, body: str, send_at: float, queued_at: float, attempt: int = 0):
         self.body = body
         self.send_at = send_at
         self.queued_at = queued_at
         self.attempt = attempt
 
-    def make_next_attempt(self, delay):
+    def make_next_attempt(self, delay: Union[int, float]):
         send_at = time.monotonic() + delay  # schedule send at now + delay sec
         return Message(self.body, send_at, self.queued_at, self.attempt + 1)
 
-    def __lt__(self, other):
+    def __lt__(self, other: "Message"):
         return self.send_at < other.send_at
 
     def __repr__(self):
-        body = self.body
-        body = body[:17] + "..." if len(body) > 20 else body
+        body = f"{self.body[:17]}..." if len(self.body) > 20 else self.body
         delta = self.send_at - time.monotonic()
-        return "Message{%s, attempt=%d, send_at=now%+gs}" % (body, self.attempt, delta)
+        return f"Message({body}, attempt={self.attempt}, send_at=now+{delta}s)"
 
 
 class SendQueue:
-    def __init__(self, maxsize):
+    def __init__(self, maxsize: int):
         self._queue = PriorityQueue()
         self._maxsize = maxsize
 
@@ -44,7 +44,7 @@ class SendQueue:
     def put(self, msg):
         return self._queue.put_nowait(msg)
 
-    def accept(self, now, body):
+    def accept(self, now: float, body: str):
         message = Message(body, send_at=now, queued_at=now)
         if self._queue.qsize() < self._maxsize:
             self._queue.put_nowait(message)
@@ -54,7 +54,7 @@ class SendQueue:
 
 # https://en.wikipedia.org/wiki/Token_bucket
 class RateLimiter:
-    def __init__(self, bucket_size, window_secs):
+    def __init__(self, bucket_size: int, window_secs: int):
         self.bucket_size = bucket_size
         self.last_tick = time.monotonic()
         self.available = bucket_size
@@ -67,10 +67,7 @@ class RateLimiter:
         self.available += passed * self.bucket_size / self.window_secs
         if self.available > self.bucket_size:
             self.available = self.bucket_size
-        if self.available < 1:
-            return False
-        self.available -= 1
-        return True
+        return self.available >= 1
 
 
 class SenderThread(threading.Thread):
@@ -106,23 +103,20 @@ class SenderThread(threading.Thread):
     def run(self):
         while True:
             try:
-                while True:
-                    item = self.queue.get()
-                    now = time.monotonic()
-                    logger.debug(
-                        "Dequeued %s at queued_at%+gs", item, now - item.queued_at
-                    )
-                    if item.send_at > now:
-                        logger.debug("Too early, enqueued %s back", item)
-                        self.queue.put(item)
-                        break
-                    self.try_send(item)
+                item = self.queue.get()
+                now = time.monotonic()
+                logger.debug("Dequeued %s at queued_at%+gs", item, now - item.queued_at)
+                if item.send_at > now:
+                    logger.debug("Too early, enqueued %s back", item)
+                    self.queue.put(item)
+                    continue
+                self.try_send(item)
             except Exception as e:
                 logger.error("Unhandled exception in consumer loop", e)
 
             time.sleep(0.1)
 
-    def try_send(self, item):
+    def try_send(self, item: Message):
         logger.debug("Trying to send %s", item)
         try:
             if self.send(item):
@@ -138,11 +132,12 @@ class SenderThread(threading.Thread):
         except Exception as e:
             logger.error("Exception in try_send", e)
 
-    def send(self, item):
+    def send(self, item: Message):
         # /dev/null is a proper place for spam
         if not self.rate_limiter.is_allowed():
             self.rate_limited.inc()
             return False
+        self.rate_limiter.available -= 1
         lag = time.monotonic() - item.queued_at
         logger.debug("Sending %s with lag %gs", item, lag)
         send_time = 0.2 + 0.3 * random.random()
