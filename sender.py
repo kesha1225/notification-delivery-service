@@ -2,10 +2,9 @@ import logging
 import time
 import threading
 import random
+from queue import PriorityQueue
 
 from prometheus_client import Gauge, Counter, Histogram
-
-from queue import PriorityQueue
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +25,9 @@ class Message:
 
     def __repr__(self):
         body = self.body
-        body = body[:17] + '...' if len(body) > 20 else body
+        body = body[:17] + "..." if len(body) > 20 else body
         delta = self.send_at - time.monotonic()
-        return 'Message{%s, attempt=%d, send_at=now%+gs}' % (body, self.attempt, delta)
+        return "Message{%s, attempt=%d, send_at=now%+gs}" % (body, self.attempt, delta)
 
 
 class SendQueue:
@@ -81,15 +80,28 @@ class SenderThread(threading.Thread):
         self.queue = queue
         self.registry = registry
         self.rate_limiter = RateLimiter(10, 5)  # 10 msg per 5s
-        queue_size = Gauge('sender_queue_size', 'Send queue size in messages', registry=registry)
+        queue_size = Gauge(
+            "sender_queue_size", "Send queue size in messages", registry=registry
+        )
         queue_size.set_function(lambda: len(queue))
-        self.rate_limited = Counter('sender_rate_limited', 'Rate limited events count', registry=registry)
-        self.send_time_histogram = Histogram('sender_send_time_seconds', 'Message sending time', registry=registry)
-        self.lag_histogram = Histogram('sender_lag_seconds', 'Sent message lag', registry=registry,
-                                       buckets=(0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, float('inf')))
-        self.attempt_histogram = Histogram('sender_failed_attempts', 'Failed attempts taken before successful send',
-                                           registry=registry,
-                                           buckets=(0, 1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 50, 70, 100, float('inf')))
+        self.rate_limited = Counter(
+            "sender_rate_limited", "Rate limited events count", registry=registry
+        )
+        self.send_time_histogram = Histogram(
+            "sender_send_time_seconds", "Message sending time", registry=registry
+        )
+        self.lag_histogram = Histogram(
+            "sender_lag_seconds",
+            "Sent message lag",
+            registry=registry,
+            buckets=(0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, float("inf")),
+        )
+        self.attempt_histogram = Histogram(
+            "sender_failed_attempts",
+            "Failed attempts taken before successful send",
+            registry=registry,
+            buckets=(0, 1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 50, 70, 100, float("inf")),
+        )
 
     def run(self):
         while True:
@@ -97,9 +109,11 @@ class SenderThread(threading.Thread):
                 while True:
                     item = self.queue.get()
                     now = time.monotonic()
-                    logger.debug('Dequeued %s at queued_at%+gs', item, now - item.queued_at)
+                    logger.debug(
+                        "Dequeued %s at queued_at%+gs", item, now - item.queued_at
+                    )
                     if item.send_at > now:
-                        logger.debug('Too early, enqueued %s back', item)
+                        logger.debug("Too early, enqueued %s back", item)
                         self.queue.put(item)
                         break
                     self.try_send(item)
@@ -109,18 +123,20 @@ class SenderThread(threading.Thread):
             time.sleep(0.1)
 
     def try_send(self, item):
-        logger.debug('Trying to send %s', item)
+        logger.debug("Trying to send %s", item)
         try:
             if self.send(item):
-                logger.info('Sent %s', item)
+                logger.info("Sent %s", item)
             else:
                 # Send failed, schedule retry
-                delay = 0.75 + 0.5 * random.random()
+                delay = (
+                    item.attempt * 1.5 if item.attempt > 0 else 0.75
+                ) + 0.5 * random.random()
                 item = item.make_next_attempt(delay)
                 self.queue.put(item)
-                logging.info('Postponed message %s', item)
+                logging.info("Postponed message %s", item)
         except Exception as e:
-            logger.error('Exception in try_send', e)
+            logger.error("Exception in try_send", e)
 
     def send(self, item):
         # /dev/null is a proper place for spam
@@ -128,7 +144,7 @@ class SenderThread(threading.Thread):
             self.rate_limited.inc()
             return False
         lag = time.monotonic() - item.queued_at
-        logger.debug('Sending %s with lag %gs', item, lag)
+        logger.debug("Sending %s with lag %gs", item, lag)
         send_time = 0.2 + 0.3 * random.random()
         time.sleep(send_time)
         self.lag_histogram.observe(lag)
