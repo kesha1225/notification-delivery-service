@@ -110,6 +110,9 @@ class SenderThread(threading.Thread):
                     logger.debug("Too early, enqueued %s back", item)
                     self.queue.put(item)
                     continue
+                # if not self.rate_limiter.is_allowed():
+                #     self.rate_limited.inc()
+                #     continue
                 self.try_send(item)
             except Exception as e:
                 logger.error("Unhandled exception in consumer loop", e)
